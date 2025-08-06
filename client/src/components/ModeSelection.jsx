@@ -69,7 +69,7 @@ function ModeSelection({ onSelect }) {
           <div className="flex justify-center space-x-8 mt-8 p-4 bg-white/60 backdrop-blur-sm rounded-xl shadow-sm">
             <div className="text-center">
               <div className="text-2xl font-bold text-indigo-600">120+</div>
-              <div className="text-sm text-gray-600">ข้อสอบ</div>
+              <div className="text-sm text-gray-600">ข้อสอบ</div> 
             </div>
             <div className="text-center">
               <div className="text-2xl font-bold text-purple-600">1-3</div>

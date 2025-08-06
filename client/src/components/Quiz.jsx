@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { useAuth } from './AuthContext';
+import { useAuth } from '../contexts/AuthContext';
 
 function Quiz({ onSubmit = () => {} }) {
   const location = useLocation();
@@ -16,11 +16,24 @@ function Quiz({ onSubmit = () => {} }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  // Mapping subtopic จาก frontend เป็น backend
+  const subtopicMap = {
+    'Linear DS': 'LS',
+    'Sorting Algo': 'SA', 
+    'Tree': 'TR',
+    'Merge Sort': 'MS',
+    'Divide & Conquer': 'DC',
+    'Greedy Algorithm': 'GA'
+  };
+
   useEffect(() => {
     console.log('Quiz.jsx state:', { subtopic, mode, initialQuestions });
-    if (!mode || !subtopic) {
-      setError('ไม่พบโหมดหรือหัวข้อที่เลือก');
+    if (!mode || mode === '' || !subtopic) {
+      setError('ไม่พบโหมดหรือหัวข้อที่เลือก หรือ mode เป็นค่าว่าง');
       setLoading(false);
+    } else {
+      // Debug: ไม่ต้อง mapping subtopic
+      console.log('Subtopic (frontend/backend):', subtopic);
     }
   }, [subtopic, mode]);
 
@@ -34,19 +47,75 @@ function Quiz({ onSubmit = () => {} }) {
         const effectiveMode = mode || 'easy';
         let url;
         if (subtopic === 'random') {
-          url = `http://localhost:5000/api/quiz/questions?quizMode=random&mode=${effectiveMode}`;
+          url = `http://localhost:5000/api/quiz/random?quizMode=random&mode=${effectiveMode}&limit=30`;
+          console.log('🎲 Random mode - Fetching URL with limit=30:', url);
+          console.log('🎲 Parameters:', { subtopic, effectiveMode, limit: 30 });
         } else {
-          url = `http://localhost:5000/api/quiz/questions?subtopic=${encodeURIComponent(subtopic)}&mode=${effectiveMode}`;
+          // แปลง subtopic เป็นชื่อย่อตาม mapping
+          const mappedSubtopic = subtopicMap[subtopic] || subtopic;
+          url = `http://localhost:5000/api/quiz/questions?subtopic=${encodeURIComponent(mappedSubtopic)}&mode=${effectiveMode}`;
+          console.log('🔧 Subtopic mapping:', { original: subtopic, mapped: mappedSubtopic });
         }
         console.log('Fetching URL:', url);
         const response = await fetch(url);
+        console.log('🎲 Response status:', response.status);
+        console.log('🎲 Response headers:', Object.fromEntries(response.headers.entries()));
+        
         if (!response.ok) {
           const errorData = await response.json();
           throw new Error(`HTTP error ${response.status}: ${JSON.stringify(errorData)}`);
         }
         const data = await response.json();
         console.log('Received questions:', data);
+        console.log('Number of questions loaded:', data.length);
+        
+        // แสดงข้อมูลเกี่ยวกับจำนวนข้อสอบ
+        if (subtopic === 'random') {
+          if (data.length < 30) {
+            console.log(`⚠️ Warning: Only ${data.length} questions available for ${subtopic} (${mode} mode) - Expected 30`);
+            console.log(`🔧 This might be due to backend not restarted or database having less than 30 questions`);
+          } else {
+            console.log(`✅ Success: Loaded ${data.length} questions for ${subtopic} (${mode} mode) - Target achieved!`);
+          }
+        } else {
+          console.log(`📚 Loaded ${data.length} questions for ${subtopic} (${mode} mode)`);
+        }
+        // Debug: ดูข้อมูลรูปภาพของแต่ละคำถาม
+        data.forEach((q, index) => {
+          console.log(`Question ${index + 1} image data:`, {
+            image_url: q.image_url,
+            titleTh: q.titleTh,
+            question_text: q.question_text,
+            subtopic: q.subtopic,
+            difficulty: q.difficulty
+          });
+        });
         if (data.length === 0) throw new Error('ไม่พบโจทย์สำหรับเงื่อนไขนี้');
+        
+        // ทดสอบรูปภาพตัวอย่างสำหรับแต่ละคำถาม
+        data.forEach((q, index) => {
+          if (q.subtopic) {
+            let testImagePath;
+            // ใช้ subtopic ตรงๆ ในการเลือก fallback image
+            if (q.subtopic === 'Linear DS') {
+              testImagePath = `/images/dc${index + 1}.png`;
+            } else if (q.subtopic === 'Sorting Algo') {
+              testImagePath = `/images/sort${index + 1}.png`;
+            } else if (q.subtopic === 'Tree') {
+              testImagePath = `/images/tree${index + 1}.png`;
+            } else if (q.subtopic === 'Merge Sort') {
+              testImagePath = `/images/merge${index + 1}.png`;
+            } else if (q.subtopic === 'Greedy Algorithm') {
+              testImagePath = `/images/ga${index + 1}.png`;
+            } else {
+              testImagePath = `/images/test${index + 1}.png`;
+            }
+            console.log(`Testing image path for question ${index + 1}:`, testImagePath);
+            console.log(`Actual image_url from database:`, q.image_url);
+            console.log(`Frontend subtopic: ${q.subtopic}`);
+          }
+        });
+        
         setQuestions(data);
         setAnswers(Array(data.length).fill(null));
         setLoading(false);
@@ -90,23 +159,67 @@ function Quiz({ onSubmit = () => {} }) {
       if (answers[i] === q.correct_answer) score += 10; // 10 คะแนนต่อข้อ
     });
 
-    if (user) {
-      try {
-        const token = localStorage.getItem('token');
-        await fetch('http://localhost:5000/api/scores', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`
-          },
-          body: JSON.stringify({ quizMode: mode, subtopic, score })
-        });
-      } catch (err) {
-        console.error('Score submission error:', err);
-      }
+    // Frontend validation: check user and token
+    const token = localStorage.getItem('token');
+    if (!user || !token) {
+      setError('กรุณาเข้าสู่ระบบก่อนส่งคะแนน');
+      return;
     }
 
+    // Validate required data
+    if (!mode || mode === '' || !subtopic || questions.length === 0) {
+      setError('ข้อมูลไม่ครบถ้วน กรุณาตรวจสอบโหมด/หัวข้อ/คำถาม (mode ต้องไม่เป็นค่าว่าง)');
+      return;
+    }
+
+    try {
+      const res = await fetch('http://localhost:5000/api/scores', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          user_id: user?.id || user?.userId || user?.userid || user?.uid || '',
+          quiz_mode: mode,
+          subtopic,
+          score
+        })
+      });
+      console.log('handleSubmit response status:', res.status);
+      if (res.status === 401 || res.status === 403) {
+        setError('กรุณาเข้าสู่ระบบใหม่ (Token หมดอายุหรือไม่ได้รับอนุญาต)');
+        console.log('Token expired or unauthorized, not navigating.');
+        return;
+      }
+      if (!res.ok) {
+        let errMsg = 'เกิดข้อผิดพลาดในการส่งคะแนน';
+        try {
+          const errData = await res.json();
+          errMsg = errData.message || errMsg;
+          console.log('handleSubmit error data:', errData);
+        } catch (e) {
+          console.log('handleSubmit error parsing response:', e);
+        }
+        setError(errMsg);
+        return;
+      }
+      // ถ้า response ok, log response
+      try {
+        const result = await res.json();
+        console.log('handleSubmit success result:', result);
+      } catch (e) {
+        console.log('handleSubmit success but cannot parse JSON:', e);
+      }
+    } catch (err) {
+      setError('เกิดข้อผิดพลาดในการเชื่อมต่อเซิร์ฟเวอร์');
+      console.log('handleSubmit network error:', err);
+      return;
+    }
+
+    // เฉพาะกรณี response ok จริง ๆ เท่านั้น
     onSubmit({ answers, score });
+    console.log('Navigating to /result with:', { answers, score, questions, mode, subtopic });
     navigate('/result', { state: { answers, score, questions, mode, subtopic } });
   };
 
@@ -157,10 +270,193 @@ function Quiz({ onSubmit = () => {} }) {
 
   const modeInfo = getModeInfo(mode);
 
+  // Helper: process image path
+  const processImagePath = (imgPath, questionIndex = 0, subtopic = null) => {
+    console.log('Processing image path:', imgPath, typeof imgPath, 'for question', questionIndex + 1);
+    if (!imgPath || typeof imgPath !== 'string') {
+      console.log('Invalid image path, trying fallback');
+      // Fallback: ลองใช้ชื่อไฟล์ตาม subtopic และ index
+      if (subtopic) {
+        let fallbackPath;
+        // ใช้ subtopic ตรงๆ ในการเลือก fallback image
+        if (subtopic === 'Linear DS') {
+          fallbackPath = `/images/dc${questionIndex + 1}.png`;
+        } else if (subtopic === 'Sorting Algo') {
+          fallbackPath = `/images/sort${questionIndex + 1}.png`;
+        } else if (subtopic === 'Tree') {
+          fallbackPath = `/images/tree${questionIndex + 1}.png`;
+        } else if (subtopic === 'Merge Sort') {
+          fallbackPath = `/images/merge${questionIndex + 1}.png`;
+        } else if (subtopic === 'Greedy Algorithm') {
+          fallbackPath = `/images/ga${questionIndex + 1}.png`;
+        } else {
+          fallbackPath = `/images/test${questionIndex + 1}.png`;
+        }
+        console.log('Using fallback path:', fallbackPath);
+        return fallbackPath;
+      }
+      return null;
+    }
+    let img = imgPath.trim();
+    if (img === '' || img === 'null' || img === 'undefined') {
+      console.log('Empty or invalid image path, trying fallback');
+      if (subtopic) {
+        let fallbackPath;
+        if (subtopic === 'Linear DS') {
+          fallbackPath = `/images/dc${questionIndex + 1}.png`;
+        } else if (subtopic === 'Sorting Algo') {
+          fallbackPath = `/images/sort${questionIndex + 1}.png`;
+        } else if (subtopic === 'Tree') {
+          fallbackPath = `/images/tree${questionIndex + 1}.png`;
+        } else if (subtopic === 'Merge Sort') {
+          fallbackPath = `/images/merge${questionIndex + 1}.png`;
+        } else if (subtopic === 'Greedy Algorithm') {
+          fallbackPath = `/images/ga${questionIndex + 1}.png`;
+        } else {
+          fallbackPath = `/images/test${questionIndex + 1}.png`;
+        }
+        console.log('Using fallback path:', fallbackPath);
+        return fallbackPath;
+      }
+      return null;
+    }
+    // ถ้าเป็น path ที่ขึ้นต้นด้วย /images/ แล้ว ให้ใช้เลย
+    if (img.startsWith('/images/')) {
+      console.log('Using existing /images/ path:', img);
+      return img;
+    }
+    
+    // ถ้าเป็น URL เต็ม ให้ใช้เลย
+    if (img.startsWith('http')) {
+      console.log('Using full URL:', img);
+      return img;
+    }
+    
+    // ถ้า path ไม่ขึ้นต้น http และไม่ขึ้นต้น / ให้เติม /images/
+    if (!img.startsWith('http') && !img.startsWith('/')) {
+      img = `/images/${img}`;
+      console.log('Added /images/ prefix:', img);
+    }
+    // ถ้าขึ้นต้นด้วย / แต่ไม่ใช่ /images/ ให้เปลี่ยนเป็น /images/
+    else if (img.startsWith('/') && !img.startsWith('/images/')) {
+      img = `/images/${img.substring(1)}`;
+      console.log('Converted to /images/ path:', img);
+    }
+    
+    console.log('Final image path:', img);
+    return img;
+  };
+
+  // Helper: always return array for options
+  const getOptions = (q) => {
+    if (!q) return [];
+    // ถ้าเป็น array และมีสมาชิกที่เป็น string ที่เป็น JSON array ให้ flatten
+    if (Array.isArray(q.options)) {
+      let result = [];
+      q.options.forEach(opt => {
+        if (typeof opt === 'string' && opt.trim().startsWith('[') && opt.trim().endsWith(']')) {
+          try {
+            const arr = JSON.parse(opt);
+            if (Array.isArray(arr)) {
+              result = result.concat(arr.map(x => String(x)));
+            } else {
+              result.push(opt);
+            }
+          } catch {
+            result.push(opt);
+          }
+        } else {
+          result.push(opt);
+        }
+      });
+      return result;
+    }
+    if (typeof q.options === 'string') {
+      const str = q.options.trim();
+      if (str.startsWith('[') && str.endsWith(']')) {
+        try {
+          const arr = JSON.parse(str);
+          if (Array.isArray(arr)) {
+            // flatten ซ้อนอีกชั้นถ้ามี string ที่เป็น array
+            let result = [];
+            arr.forEach(opt => {
+              if (typeof opt === 'string' && opt.trim().startsWith('[') && opt.trim().endsWith(']')) {
+                try {
+                  const subArr = JSON.parse(opt);
+                  if (Array.isArray(subArr)) {
+                    result = result.concat(subArr.map(x => String(x)));
+                  } else {
+                    result.push(opt);
+                  }
+                } catch {
+                  result.push(opt);
+                }
+              } else {
+                result.push(opt);
+              }
+            });
+            return result;
+          }
+        } catch (e) {
+          // fallback split
+          return str.slice(1, -1).split(',').map(opt => opt.replace(/^"|"$/g, '').trim()).filter(Boolean);
+        }
+      }
+      // ปกติ split by comma
+      return str.split(',').map(opt => opt.trim()).filter(Boolean);
+    }
+    return [];
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-100">
-        <p className="text-lg text-gray-600">กำลังโหลดโจทย์...</p>
+        <div className="text-center">
+          <p className="text-lg text-gray-600 mb-4">
+            กำลังโหลดโจทย์... 
+            <br />
+            <span className="text-sm text-gray-500">
+              {subtopic === 'random' ? 'โหมดสุ่มข้อสอบ (เป้าหมาย 30 ข้อ)' : `โหมด ${subtopic} (${mode})`}
+            </span>
+          </p>
+          {/* ทดสอบรูปภาพตัวอย่าง */}
+          <div className="mb-4">
+            <p className="text-sm text-gray-500 mb-2">ทดสอบรูปภาพ:</p>
+            <div className="flex space-x-4 justify-center">
+              <img 
+                src="/images/test1.png" 
+                alt="Test image 1" 
+                className="w-24 h-24 rounded-lg shadow-md object-contain"
+                onLoad={() => console.log('Test image 1 loaded successfully')}
+                onError={(e) => console.error('Test image 1 failed to load:', e)}
+              />
+              <img 
+                src="/images/dc1.png" 
+                alt="Test image 2 (LS)" 
+                className="w-24 h-24 rounded-lg shadow-md object-contain"
+                onLoad={() => console.log('Test image 2 (LS) loaded successfully')}
+                onError={(e) => console.error('Test image 2 (LS) failed to load:', e)}
+              />
+              <img 
+                src="/images/sort1.png" 
+                alt="Test image 3 (SA)" 
+                className="w-24 h-24 rounded-lg shadow-md object-contain"
+                onLoad={() => console.log('Test image 3 (SA) loaded successfully')}
+                onError={(e) => console.error('Test image 3 (SA) failed to load:', e)}
+              />
+              <img 
+                src="/images/tree1.png" 
+                alt="Test image 4 (TR)" 
+                className="w-24 h-24 rounded-lg shadow-md object-contain"
+                onLoad={() => console.log('Test image 4 (TR) loaded successfully')}
+                onError={(e) => console.error('Test image 4 (TR) failed to load:', e)}
+              />
+            </div>
+            <p className="text-xs text-gray-400 mt-2">
+              Mapping: Linear DS → LS, Sorting Algo → SA, Tree → TR, Merge Sort → MS, Greedy Algorithm → GA
+            </p>
+          </div>
+        </div>
       </div>
     );
   }
@@ -176,7 +472,12 @@ function Quiz({ onSubmit = () => {} }) {
   if (questions.length === 0) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-100">
-        <p className="text-lg text-gray-600">ไม่พบโจทย์สำหรับโหมด {getQuizModeTitle()}</p>
+        <div className="text-center">
+          <p className="text-lg text-gray-600 mb-2">ไม่พบโจทย์สำหรับโหมด {getQuizModeTitle()}</p>
+          <p className="text-sm text-gray-500">
+            ลองเลือกโหมดหรือหัวข้ออื่น หรือตรวจสอบการเชื่อมต่อฐานข้อมูล
+          </p>
+        </div>
       </div>
     );
   }
@@ -201,7 +502,8 @@ function Quiz({ onSubmit = () => {} }) {
             </div>
             <div className="flex items-center space-x-4">
               <div className="text-sm text-gray-600">
-                ข้อ {viewMode === 'single' ? currentQuestion + 1 : '1'}-{questions.length}
+                ข้อ {viewMode === 'single' ? currentQuestion + 1 : '1'}-{questions.length} 
+                {subtopic === 'random' ? ` (สุ่ม ${questions.length} ข้อ)` : ` (ทั้งหมด ${questions.length} ข้อ)`}
               </div>
               <div className="w-32 bg-gray-200 rounded-full h-2">
                 <div
@@ -238,7 +540,10 @@ function Quiz({ onSubmit = () => {} }) {
           </div>
           <div className="md:hidden mt-4">
             <div className="flex items-center justify-between text-sm text-gray-600 mb-2">
-              <span>ข้อ {currentQuestion + 1} จาก {questions.length}</span>
+              <span>
+                ข้อ {currentQuestion + 1} จาก {questions.length} 
+                {subtopic === 'random' ? ` (สุ่ม ${questions.length} ข้อ)` : ` (ทั้งหมด ${questions.length} ข้อ)`}
+              </span>
               <span>{getProgress()}% เสร็จสิ้น</span>
             </div>
             <div className="w-full bg-gray-200 rounded-full h-2">
@@ -273,27 +578,48 @@ function Quiz({ onSubmit = () => {} }) {
               <h2 className="text-xl font-semibold text-gray-800 leading-relaxed mb-4">
                 {questions[currentQuestion]?.titleTh || questions[currentQuestion]?.question_text}
               </h2>
-              {questions[currentQuestion]?.image || questions[currentQuestion]?.image_url ? (
-                <div className="mb-6">
-                  <img
-                    src={questions[currentQuestion].image || questions[currentQuestion].image_url}
-                    alt="Question illustration"
-                    className="w-full max-w-md mx-auto rounded-lg shadow-md object-contain"
-                    onError={(e) => {
-                      console.error('Image load error:', e);
-                      e.target.src = 'https://via.placeholder.com/300x150?text=Image+Not+Found';
-                    }}
-                  />
-                </div>
-              ) : (
-                <div className="mb-6 w-full max-w-md mx-auto h-48 bg-gray-200 rounded-lg flex items-center justify-center">
-                  <span className="text-gray-500">ไม่มีรูปภาพ</span>
-                </div>
-              )}
+              {(() => {
+                const originalImg = questions[currentQuestion]?.image_url;
+                console.log('Original image data for question', currentQuestion + 1, ':', originalImg);
+                
+                const img = processImagePath(originalImg, currentQuestion, questions[currentQuestion]?.subtopic);
+                if (img) {
+                  return (
+                    <div className="mb-6">
+                      <img
+                        src={img}
+                        alt="Question illustration"
+                        className="w-full max-w-md mx-auto rounded-lg shadow-md object-contain"
+                        onLoad={() => console.log('Image loaded successfully:', img)}
+                        onError={(e) => {
+                          console.error('Image load error for:', img, e);
+                          e.target.style.display = 'none';
+                          e.target.nextSibling.style.display = 'block';
+                        }}
+                      />
+                      <div className="w-full max-w-md mx-auto h-48 bg-gray-200 rounded-lg flex items-center justify-center" style={{display: 'none'}}>
+                        <div className="text-center">
+                          <span className="text-gray-500 block">รูปภาพไม่พบ</span>
+                          <span className="text-xs text-gray-400 block mt-1">Path: {img}</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                                  } else {
+                    return (
+                      <div className="mb-6 w-full max-w-md mx-auto h-48 bg-gray-200 rounded-lg flex items-center justify-center">
+                        <div className="text-center">
+                          <span className="text-gray-500 block">ไม่มีรูปภาพ</span>
+                          <span className="text-xs text-gray-400 block mt-1">สำหรับคำถามนี้</span>
+                        </div>
+                      </div>
+                    );
+                  }
+              })()}
             </div>
             <div className="space-y-3 mb-8">
-              {Array.isArray(questions[currentQuestion]?.options) ? (
-                questions[currentQuestion].options.map((option, i) => (
+              {getOptions(questions[currentQuestion]).length > 0 ? (
+                getOptions(questions[currentQuestion]).map((option, i) => (
                   <label
                     key={i}
                     className={`flex items-center p-4 rounded-xl border-2 cursor-pointer transition-all duration-200 hover:bg-gray-50 ${
@@ -380,26 +706,47 @@ function Quiz({ onSubmit = () => {} }) {
                   </div>
                 </div>
                 <h3 className="text-lg font-semibold text-gray-800 mb-4">{q.titleTh || q.question_text}</h3>
-                {q.image || q.image_url ? (
-                  <div className="mb-6">
-                    <img
-                      src={q.image || q.image_url}
-                      alt="Question illustration"
-                      className="w-full max-w-md mx-auto rounded-lg shadow-md object-contain"
-                      onError={(e) => {
-                        console.error('Image load error:', e);
-                        e.target.src = 'https://via.placeholder.com/300x150?text=Image+Not+Found';
-                      }}
-                    />
-                  </div>
-                ) : (
-                  <div className="mb-6 w-full max-w-md mx-auto h-48 bg-gray-200 rounded-lg flex items-center justify-center">
-                    <span className="text-gray-500">ไม่มีรูปภาพ</span>
-                  </div>
-                )}
+                {(() => {
+                  const originalImg = q.image_url;
+                  console.log('Original image data for question', index + 1, ':', originalImg);
+                  
+                  const img = processImagePath(originalImg, index, q.subtopic);
+                  if (img) {
+                    return (
+                      <div className="mb-6">
+                        <img
+                          src={img}
+                          alt="Question illustration"
+                          className="w-full max-w-md mx-auto rounded-lg shadow-md object-contain"
+                          onLoad={() => console.log('Image loaded successfully:', img)}
+                          onError={(e) => {
+                            console.error('Image load error for:', img, e);
+                            e.target.style.display = 'none';
+                            e.target.nextSibling.style.display = 'block';
+                          }}
+                        />
+                        <div className="w-full max-w-md mx-auto h-48 bg-gray-200 rounded-lg flex items-center justify-center" style={{display: 'none'}}>
+                          <div className="text-center">
+                            <span className="text-gray-500 block">รูปภาพไม่พบ</span>
+                            <span className="text-xs text-gray-400 block mt-1">Path: {img}</span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  } else {
+                    return (
+                      <div className="mb-6 w-full max-w-md mx-auto h-48 bg-gray-200 rounded-lg flex items-center justify-center">
+                        <div className="text-center">
+                          <span className="text-gray-500 block">ไม่มีรูปภาพ</span>
+                          <span className="text-xs text-gray-400 block mt-1">สำหรับคำถามนี้</span>
+                        </div>
+                      </div>
+                    );
+                  }
+                })()}
                 <div className="space-y-2">
-                  {Array.isArray(q.options) ? (
-                    q.options.map((option, i) => (
+                  {getOptions(q).length > 0 ? (
+                    getOptions(q).map((option, i) => (
                       <label
                         key={i}
                         className={`flex items-center p-3 rounded-lg border cursor-pointer transition-all duration-200 hover:bg-gray-50 ${

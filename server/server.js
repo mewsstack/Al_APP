@@ -5,25 +5,32 @@ const mysql = require('mysql2/promise');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const scoresRouter = require('./routes/scores');
-
-// Debug environment variables
-console.log('Environment variables:', {
-  DB_HOST: process.env.DB_HOST,
-  DB_USER: process.env.DB_USER,
-  DB_PASSWORD: process.env.DB_PASSWORD ? '[REDACTED]' : 'undefined',
-  DB_NAME: process.env.DB_NAME,
-  JWT_SECRET: process.env.JWT_SECRET,
-  PORT: process.env.PORT,
-});
+const usersRouter = require('./routes/user');
+const quizRouter = require('./routes/quiz');
 
 const app = express();
-app.use(cors());
+
+// ตั้งค่า CORS
+app.use(cors({
+  origin: 'http://localhost:3000',
+  credentials: true,
+}));
 app.use(express.json());
+
+// Debug environment variables
+console.log('Database config:', {
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD ? '[REDACTED]' : 'undefined',
+  database: process.env.DB_NAME,
+  JWT_SECRET: process.env.JWT_SECRET ? '[REDACTED]' : 'undefined',
+  PORT: process.env.PORT,
+});
 
 const dbConfig = {
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
+  password: process.env.DB_PASSWORD || '',
   database: process.env.DB_NAME,
 };
 
@@ -35,20 +42,30 @@ const authenticateToken = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    console.log('Decoded token:', decoded); // Debug
     const connection = await mysql.createConnection(dbConfig);
-    const [rows] = await connection.execute('SELECT id, username, email, score FROM users WHERE id = ?', [decoded.userId]);
+    const [rows] = await connection.execute(
+      'SELECT id, username, email, score, is_admin FROM users WHERE id = ?',
+      [decoded.userId]
+    );
     await connection.end();
     if (rows.length === 0) return res.status(401).json({ error: 'ผู้ใช้ไม่พบ' });
     req.user = rows[0];
     next();
   } catch (err) {
     console.error('Token error:', err.message);
-    res.status(403).json({ error: 'Token ไม่ถูกต้อง' });
+    res.status(403).json({ error: 'Token ไม่ถูกต้องหรือหมดอายุ' });
   }
 };
 
-// สร้างตาราง users และ scores
+// Middleware สำหรับตรวจสอบว่าเป็น Admin
+const isAdmin = async (req, res, next) => {
+  if (!req.user.is_admin) {
+    return res.status(403).json({ error: 'เฉพาะผู้ดูแลระบบเท่านั้น' });
+  }
+  next();
+};
+
+// สร้างตาราง users, scores, และ questions
 const initializeDatabase = async () => {
   try {
     const connection = await mysql.createConnection(dbConfig);
@@ -59,6 +76,7 @@ const initializeDatabase = async () => {
         email VARCHAR(100) UNIQUE NOT NULL,
         password VARCHAR(255) NOT NULL,
         score INT DEFAULT 0,
+        is_admin BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -70,7 +88,19 @@ const initializeDatabase = async () => {
         subtopic VARCHAR(50),
         score INT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users(id)
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `);
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS questions (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        question_text VARCHAR(255) NOT NULL,
+        options JSON NOT NULL,
+        difficulty ENUM('easy', 'normal', 'hard') NOT NULL,
+        subtopic VARCHAR(50) NOT NULL,
+        correct_answer VARCHAR(255) NOT NULL,
+        explanation VARCHAR(255),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
     await connection.end();
@@ -79,11 +109,13 @@ const initializeDatabase = async () => {
     console.error('Database initialization error:', error.message);
   }
 };
+
+// เรียกใช้งาน initializeDatabase
 initializeDatabase();
 
 // Register
-app.post('/api/register', async (req, res) => {
-  const { username, email, password } = req.body;
+app.post('/api/register', authenticateToken, isAdmin, async (req, res) => {
+  const { username, email, password, is_admin = false } = req.body;
   if (!username || !email || !password) {
     return res.status(400).json({ error: 'กรุณากรอกข้อมูลให้ครบถ้วน' });
   }
@@ -92,18 +124,17 @@ app.post('/api/register', async (req, res) => {
     const connection = await mysql.createConnection(dbConfig);
     const hashedPassword = await bcrypt.hash(password, 10);
     await connection.execute(
-      'INSERT INTO users (username, email, password) VALUES (?, ?, ?)',
-      [username, email, hashedPassword]
+      'INSERT INTO users (username, email, password, is_admin) VALUES (?, ?, ?, ?)',
+      [username, email, hashedPassword, is_admin]
     );
     await connection.end();
     res.status(201).json({ message: 'สมัครสมาชิกสำเร็จ' });
   } catch (err) {
     console.error('Register error:', err.message);
     if (err.code === 'ER_DUP_ENTRY') {
-      res.status(400).json({ error: 'ชื่อผู้ใช้หรืออีเมลนี้มีอยู่แล้ว' });
-    } else {
-      res.status(500).json({ error: 'เกิดข้อผิดพลาดในการสมัครสมาชิก' });
+      return res.status(400).json({ error: 'ชื่อผู้ใช้หรืออีเมลนี้มีอยู่แล้ว' });
     }
+    res.status(500).json({ error: 'เกิดข้อผิดพลาดในการสมัครสมาชิก' });
   }
 });
 
@@ -116,7 +147,10 @@ app.post('/api/login', async (req, res) => {
 
   try {
     const connection = await mysql.createConnection(dbConfig);
-    const [rows] = await connection.execute('SELECT id, username, email, password, score FROM users WHERE email = ?', [email]);
+    const [rows] = await connection.execute(
+      'SELECT id, username, email, password, score, is_admin FROM users WHERE email = ?',
+      [email]
+    );
     await connection.end();
 
     if (rows.length === 0) {
@@ -129,8 +163,21 @@ app.post('/api/login', async (req, res) => {
       return res.status(401).json({ error: 'อีเมลหรือรหัสผ่านไม่ถูกต้อง' });
     }
 
-    const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: '1d' });
-    res.json({ token, user: { id: user.id, username: user.username, email: user.email, score: user.score } });
+    const token = jwt.sign(
+      { userId: user.id, is_admin: user.is_admin },
+      process.env.JWT_SECRET,
+      { expiresIn: '1d' }
+    );
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        score: user.score,
+        is_admin: user.is_admin,
+      },
+    });
   } catch (err) {
     console.error('Login error:', err.message);
     res.status(500).json({ error: 'เกิดข้อผิดพลาดในการล็อกอิน' });
@@ -148,11 +195,11 @@ app.get('/api/profile', authenticateToken, (req, res) => {
 });
 
 // Rank
-app.get('/api/rank', async (req, res) => {
+app.get('/api/rank', authenticateToken, isAdmin, async (req, res) => {
   try {
     const connection = await mysql.createConnection(dbConfig);
     const [rows] = await connection.execute(
-      'SELECT id, username, score FROM users ORDER BY score DESC LIMIT 50'
+      'SELECT id, username, score, is_admin FROM users ORDER BY score DESC LIMIT 50'
     );
     await connection.end();
     res.json(rows);
@@ -173,133 +220,238 @@ app.get('/api/scores', authenticateToken, async (req, res) => {
     await connection.end();
     res.json(rows);
   } catch (err) {
-    console.error('Get scores error:', err);
-    res.status(500).json({ error: 'เกิดข้อผิดพลาดในการดึงคะแนน', details: err.message });
+    console.error('Get scores error:', err.message);
+    res.status(500).json({ error: 'เกิดข้อผิดพลาดในการดึงคะแนน' });
   }
 });
 
-// API สำหรับดึงคำถาม
-app.get('/api/quiz/questions', async (req, res) => {
-  res.setHeader('Cache-Control', 'no-store');
-  const { mode, subtopic, quizMode } = req.query;
-  console.log('Request received:', { mode, subtopic, quizMode });
-
-  if (!mode || !['easy', 'normal', 'hard'].includes(mode)) {
-    return res.status(400).json({ error: 'ต้องระบุ mode ที่ถูกต้อง (easy, normal, hard)' });
-  }
-
-  let connection;
+// Quiz Questions (ดึงทั้งหมดสำหรับ Admin)
+app.get('/api/quiz/questions/all', authenticateToken, isAdmin, async (req, res) => {
   try {
-    connection = await mysql.createConnection(dbConfig);
-    console.log('Connected to MySQL database successfully');
-
-    let query = `
-      SELECT id, question_text AS titleTh, options, difficulty, image_url, subtopic, correct_answer, explanation
-      FROM questions
-      WHERE difficulty = ?
-    `;
-    let params = [mode];
-
-    const subtopicMapping = {
-      'Linear DS': 'LS',
-      'Sorting Algo': 'Sorting Algo',
-      'Tree': 'Tree',
-      'Merge Sort': 'Merge Sort',
-      'Divide & Conquer': 'DivideConquer',
-      'Greedy Algorithm': 'Greedy'
-    };
-    const dbSubtopic = subtopic ? subtopicMapping[subtopic] || subtopic : null;
-
-    if (quizMode === 'random') {
-      let subtopics;
-      if (mode === 'hard') {
-        subtopics = ['DivideConquer', 'Greedy'];
-      } else if (mode === 'normal') {
-        subtopics = ['Tree', 'Merge Sort'];
-      } else {
-        subtopics = ['LS', 'Sorting'];
-      }
-      query += ` AND subtopic IN (${subtopics.map(() => '?').join(',')}) ORDER BY RAND() LIMIT 10`;
-      params.push(...subtopics);
-      console.log('Random query:', { query, params, subtopics });
-    } else if (dbSubtopic && Object.values(subtopicMapping).includes(dbSubtopic)) {
-      query += ` AND subtopic = ?`;
-      params.push(dbSubtopic);
-      console.log('Subtopic query:', { query, params, dbSubtopic, originalSubtopic: subtopic });
-    } else {
-      return res.status(400).json({
-        error: `ต้องระบุ subtopic (${Object.keys(subtopicMapping).join(', ')}) หรือ quizMode=random`,
-        receivedSubtopic: subtopic,
-        receivedQuizMode: quizMode
-      });
-    }
-
-    const [rows] = await connection.execute(query, params);
-    console.log('Query result:', rows);
-
-    if (rows.length === 0) {
-      const [debugRows] = await connection.execute(
-        `SELECT subtopic, difficulty, COUNT(*) AS count FROM questions GROUP BY subtopic, difficulty`
-      );
-      console.log('Debug: Available questions:', debugRows);
-      return res.status(404).json({
-        error: `ไม่พบโจทย์สำหรับ subtopic=${subtopic || 'random'} และ mode=${mode}`,
-        debug: debugRows
-      });
-    }
-
-    const parsedRows = rows.map(row => {
-      let parsedOptions = [];
-      if (row.options) {
-        try {
-          parsedOptions = typeof row.options === 'string' ? JSON.parse(row.options) : row.options;
-        } catch (e) {
-          console.error(`Invalid JSON in options for question ${row.id}:`, row.options);
-          parsedOptions = [];
-        }
-      }
-      return {
-        ...row,
-        options: parsedOptions
-      };
-    });
-
-    res.setHeader('Content-Type', 'application/json');
+    const connection = await mysql.createConnection(dbConfig);
+    const [rows] = await connection.execute(
+      'SELECT id, question_text AS titleTh, options, difficulty, subtopic, correct_answer, explanation FROM questions'
+    );
+    console.log('Raw questions from DB:', rows); // ตรวจสอบข้อมูลดิบ
+    const parsedRows = rows.map(row => ({
+      ...row,
+      options: JSON.parse(row.options), // ตรวจสอบการ parse JSON
+    }));
+    console.log('Parsed questions:', parsedRows); // ตรวจสอบหลัง parse
+    await connection.end();
     res.json(parsedRows);
-  } catch (error) {
-    console.error('Database error:', error.message);
-    res.status(500).json({ error: 'เกิดข้อผิดพลาดในการดึงโจทย์', details: error.message });
-  } finally {
-    if (connection) await connection.end();
+  } catch (err) {
+    console.error('Get all questions error:', err.message);
+    res.status(500).json({ error: 'เกิดข้อผิดพลาดในการดึงข้อมูลข้อสอบ' });
   }
 });
 
-// API สำหรับสุ่มคำถาม
+// Add Question
+app.post('/api/quiz/questions', authenticateToken, isAdmin, async (req, res) => {
+  const { titleTh, options, difficulty, subtopic, correct_answer, explanation } = req.body;
+  if (!titleTh || !options || !difficulty || !subtopic || !correct_answer) {
+    return res.status(400).json({ error: 'กรุณากรอกข้อมูลให้ครบถ้วน' });
+  }
+
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+    await connection.execute(
+      'INSERT INTO questions (question_text, options, difficulty, subtopic, correct_answer, explanation) VALUES (?, ?, ?, ?, ?, ?)',
+      [titleTh, JSON.stringify(options), difficulty, subtopic, correct_answer, explanation]
+    );
+    await connection.end();
+    res.status(201).json({ message: 'เพิ่มข้อสอบสำเร็จ' });
+  } catch (err) {
+    console.error('Add question error:', err.message);
+    res.status(500).json({ error: 'เกิดข้อผิดพลาดในการเพิ่มข้อสอบ' });
+  }
+});
+
+// Delete Question
+app.delete('/api/quiz/questions/:id', authenticateToken, isAdmin, async (req, res) => {
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+    const [result] = await connection.execute(
+      'DELETE FROM questions WHERE id = ?',
+      [req.params.id]
+    );
+    await connection.end();
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'ไม่พบข้อสอบ' });
+    }
+    res.json({ message: 'ลบข้อสอบสำเร็จ' });
+  } catch (err) {
+    console.error('Delete question error:', err.message);
+    res.status(500).json({ error: 'เกิดข้อผิดพลาดในการลบข้อสอบ' });
+  }
+});
+
+// Update Question
+app.put('/api/quiz/questions/:id', authenticateToken, isAdmin, async (req, res) => {
+  const { titleTh, options, difficulty, subtopic, correct_answer, explanation } = req.body;
+  if (!titleTh || !options || !difficulty || !subtopic || !correct_answer) {
+    return res.status(400).json({ error: 'กรุณากรอกข้อมูลให้ครบถ้วน' });
+  }
+
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+    const [result] = await connection.execute(
+      'UPDATE questions SET question_text = ?, options = ?, difficulty = ?, subtopic = ?, correct_answer = ?, explanation = ? WHERE id = ?',
+      [titleTh, JSON.stringify(options), difficulty, subtopic, correct_answer, explanation, req.params.id]
+    );
+    await connection.end();
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'ไม่พบข้อสอบ' });
+    }
+    res.json({ message: 'แก้ไขข้อสอบสำเร็จ' });
+  } catch (err) {
+    console.error('Update question error:', err.message);
+    res.status(500).json({ error: 'เกิดข้อผิดพลาดในการแก้ไขข้อสอบ' });
+  }
+});
+
+// Random Quiz
 app.get('/api/quiz/random', async (req, res) => {
   const { mode } = req.query;
   let connection;
   try {
     connection = await mysql.createConnection(dbConfig);
-    console.log('Connected to MySQL database successfully');
     const [rows] = await connection.execute(
-      `SELECT * FROM questions WHERE difficulty = ? ORDER BY RAND() LIMIT 10`,
+      'SELECT * FROM questions WHERE difficulty = ? ORDER BY RAND() LIMIT 10',
       [mode]
     );
     const parsedRows = rows.map(row => ({
       ...row,
-      options: typeof row.options === 'string' ? JSON.parse(row.options) : row.options
+      options: JSON.parse(row.options || '[]'),
     }));
     res.json(parsedRows);
-  } catch (error) {
-    console.error('Database error:', error.message);
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    console.error('Random quiz error:', err.message);
+    res.status(500).json({ error: 'เกิดข้อผิดพลาดในการสุ่มโจทย์' });
   } finally {
     if (connection) await connection.end();
   }
 });
 
-app.use('/api/scores', scoresRouter);
+// API สำหรับกำหนด Admin (ควรลบหลังใช้งาน)
+app.post('/api/make-admin', authenticateToken, isAdmin, async (req, res) => {
+  const { userId } = req.body;
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+    const [result] = await connection.execute(
+      'UPDATE users SET is_admin = TRUE WHERE id = ?',
+      [userId]
+    );
+    await connection.end();
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'ไม่พบผู้ใช้' });
+    }
+    res.json({ message: 'กำหนด Admin สำเร็จ' });
+  } catch (err) {
+    console.error('Make admin error:', err.message);
+    res.status(500).json({ error: 'เกิดข้อผิดพลาด' });
+  }
+});
 
-app.listen(process.env.PORT, () => {
-  console.log(`Server running on port ${process.env.PORT}`);
+// เพิ่มเส้นทางจาก usersRouter หรือกำหนดใน server.js
+app.use('/api/scores', scoresRouter);
+app.use('/api/users', usersRouter);
+app.use('/api/quiz', quizRouter);
+
+// เพิ่มการกำหนดเส้นทางถ้ายังไม่มีใน usersRouter
+app.delete('/api/users/:id', authenticateToken, isAdmin, async (req, res) => {
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+    const [user] = await connection.execute('SELECT is_admin FROM users WHERE id = ?', [req.params.id]);
+    if (user[0]?.is_admin) {
+      await connection.end();
+      return res.status(403).json({ error: 'ไม่สามารถลบผู้ใช้ที่เป็น Admin ได้' });
+    }
+    await connection.execute('DELETE FROM scores WHERE user_id = ?', [req.params.id]);
+    const [result] = await connection.execute('DELETE FROM users WHERE id = ?', [req.params.id]);
+    await connection.end();
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'ไม่พบผู้ใช้' });
+    }
+    res.json({ message: 'ลบผู้ใช้สำเร็จ' });
+  } catch (err) {
+    console.error('Delete user error:', err.message);
+    res.status(500).json({ error: 'เกิดข้อผิดพลาดในการลบผู้ใช้' });
+  }
+});
+
+app.put('/api/users/:id/score', authenticateToken, isAdmin, async (req, res) => {
+  const { score } = req.body;
+  if (typeof score !== 'number') {
+    return res.status(400).json({ error: 'คะแนนต้องเป็นตัวเลข' });
+  }
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+    const [result] = await connection.execute(
+      'UPDATE users SET score = ? WHERE id = ?',
+      [score, req.params.id]
+    );
+    await connection.end();
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'ไม่พบผู้ใช้' });
+    }
+    res.json({ message: 'อัปเดตคะแนนสำเร็จ' });
+  } catch (err) {
+    console.error('Score update error:', err.message);
+    res.status(500).json({ error: 'เกิดข้อผิดพลาดในการอัปเดตคะแนน' });
+  }
+});
+
+app.put('/api/users/:id/role', authenticateToken, isAdmin, async (req, res) => {
+  const { is_admin } = req.body;
+  const { id } = req.params;
+
+  if (typeof is_admin !== 'boolean') {
+    return res.status(400).json({ error: 'is_admin ต้องเป็น boolean' });
+  }
+
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+    console.log(`Updating role for user ID ${id} to is_admin: ${is_admin}`);
+    const [result] = await connection.execute(
+      'UPDATE users SET is_admin = ? WHERE id = ?',
+      [is_admin, id]
+    );
+    await connection.end();
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'ไม่พบผู้ใช้' });
+    }
+    res.json({ message: 'อัปเดตสถานะ Admin สำเร็จ' });
+  } catch (err) {
+    console.error('Role update error:', err.message);
+    res.status(500).json({ error: 'เกิดข้อผิดพลาดในการอัปเดตสถานะ Admin' });
+  }
+});
+
+app.listen(process.env.PORT || 5000, () => {
+  console.log(`Server running on port ${process.env.PORT || 5000}`);
+});
+
+// ใน server.js
+app.post('/api/signup', async (req, res) => {
+  const { username, email, password } = req.body;
+  if (!username || !email || !password) {
+    return res.status(400).json({ error: 'กรุณากรอกข้อมูลให้ครบถ้วน' });
+  }
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+    const hashedPassword = await bcrypt.hash(password, 10);
+    await connection.execute(
+      'INSERT INTO users (username, email, password, is_admin) VALUES (?, ?, ?, FALSE)',
+      [username, email, hashedPassword]
+    );
+    await connection.end();
+    res.status(201).json({ message: 'สมัครสมาชิกสำเร็จ' });
+  } catch (err) {
+    console.error('Signup error:', err.message);
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(400).json({ error: 'ชื่อผู้ใช้หรืออีเมลนี้มีอยู่แล้ว' });
+    }
+    res.status(500).json({ error: 'เกิดข้อผิดพลาดในการสมัครสมาชิก' });
+  }
 });

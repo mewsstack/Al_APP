@@ -10,13 +10,18 @@ import Register from './components/Register';
 import NormalModeSelection from './components/NormalModeSelection';
 import Profile from './components/Profile';
 import Rank from './components/Rank';
+import AdminPage from './components/AdminPage'; // นำเข้า AdminPage
 import { Navigate } from 'react-router-dom';
-import { AuthProvider, useAuth } from './components/AuthContext';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
 
-function ProtectedRoute({ children }) {
+function ProtectedRoute({ children, requireAdmin = false }) {
   const { user, loading } = useAuth();
-  if (loading) return <div>Loading...</div>;
-  return user ? children : <Navigate to="/login" />;
+  if (loading) return <div>กำลังโหลด...</div>;
+  
+  if (!user) return <Navigate to="/login" />;
+  if (requireAdmin && !user.is_admin) return <Navigate to="/admin" />;
+  
+  return children;
 }
 
 function App() {
@@ -36,31 +41,44 @@ function AppContent() {
   const navigate = useNavigate();
 
   const handleModeSelect = (selectedMode) => {
+    console.log('🔍 Debug handleModeSelect:', { selectedMode, currentPage });
+    
     if (!selectedMode) {
-      console.error('Error: selectedMode is undefined or null');
+      console.error('ข้อผิดพลาด: selectedMode เป็น undefined หรือ null');
       setCurrentPage('home');
       setMode('');
       navigate('/');
       return;
     }
-    console.log('Selected mode:', selectedMode);
+    console.log('✅ เลือกโหมด:', selectedMode);
     setMode(selectedMode);
     setCurrentPage('topic');
     navigate('/topic', { state: { mode: selectedMode } });
   };
 
   const handleTopicSelect = (selectedQuizMode) => {
-    if (!selectedQuizMode || !mode) {
-      console.error('Error: selectedQuizMode or mode is undefined or null', { selectedQuizMode, mode });
+    console.log('🔍 Debug handleTopicSelect:', { selectedQuizMode, mode, currentPage });
+    
+    if (!selectedQuizMode) {
+      console.error('ข้อผิดพลาด: selectedQuizMode เป็น undefined หรือ null');
       setCurrentPage('mode');
       setQuizMode('');
       navigate('/');
       return;
     }
-    console.log('Selected topic:', selectedQuizMode, 'Mode:', mode);
+    
+    if (!mode) {
+      console.error('ข้อผิดพลาด: mode เป็น undefined หรือ null');
+      setCurrentPage('mode');
+      setQuizMode('');
+      navigate('/');
+      return;
+    }
+    
+    console.log('✅ เลือกหัวข้อ:', selectedQuizMode, 'โหมด:', mode);
     setQuizMode(selectedQuizMode);
-    const quizState = { mode, subtopic: selectedQuizMode, questions: [] }; // ใช้ subtopic แทน quizMode
-    localStorage.setItem('quizState', JSON.stringify(quizState)); // บันทึก state
+    const quizState = { mode, subtopic: selectedQuizMode, questions: [] };
+    localStorage.setItem('quizState', JSON.stringify(quizState));
     navigate('/quiz', { state: quizState });
   };
 
@@ -82,6 +100,7 @@ function AppContent() {
           <Route path="/register" element={<Register />} />
           <Route path="/rank" element={<Rank />} />
           <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
+          <Route path="/admin" element={<ProtectedRoute requireAdmin={true}><AdminPage /></ProtectedRoute>} />
           <Route path="*" element={<Navigate to="/" />} />
         </Routes>
       </div>

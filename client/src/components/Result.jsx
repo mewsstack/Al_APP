@@ -1,6 +1,6 @@
 // Result.js
 import { useLocation, useNavigate } from 'react-router-dom';
-import { useAuth } from './AuthContext';
+import { useAuth } from '../contexts/AuthContext';
 import { useEffect } from 'react';
 
 function Result() {

@@ -4,6 +4,8 @@ import { useNavigate } from 'react-router-dom';
 function TopicSelection({ onSelect, mode = 'easy' }) {
   const [hoveredTopic, setHoveredTopic] = useState(null);
   const navigate = useNavigate();
+  
+  console.log('🔍 TopicSelection received mode:', mode);
 
   const topicsByMode = {
     easy: [
